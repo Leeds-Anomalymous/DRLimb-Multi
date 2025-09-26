@@ -35,7 +35,7 @@ def set_random_seed(seed):
 #由于方差太小，此次数据用标准差
 def calculate_and_update_variance(save_dir, dataset_name, training_ratio, num_runs, rho):
     """
-    计算最近num_runs次训练的G-mean标准差并更新Excel文件
+    计算最近num_runs次训练的各类准确率标准差并更新Excel文件
     
     Args:
         save_dir: 保存目录
@@ -64,29 +64,35 @@ def calculate_and_update_variance(save_dir, dataset_name, training_ratio, num_ru
         if len(filtered_df) < num_runs:
             print(f"警告: 只找到 {len(filtered_df)} 条记录，少于期望的 {num_runs} 次")
         
-        # 提取G-mean值
-        g_mean_values = filtered_df['G-mean'].values
+        # 要计算标准差的指标列表
+        metrics = ['总体准确率', '头部准确率', '中部准确率', '尾部准确率']
         
-        # 计算标准差
-        g_mean_std = np.std(g_mean_values, ddof=1)  # 使用样本标准差
-        
-        print(f"G-mean值: {g_mean_values}")
-        print(f"G-mean标准差: {g_mean_std:.6f}")
-        
-        # 添加标准差列（如果不存在）
-        if 'G-mean标准差' not in df.columns:
-            df['G-mean标准差'] = None
-        
-        # 获取最近num_runs次记录的索引
-        recent_indices = filtered_df.index
-        
-        # 将标准差值添加到这些行
-        for idx in recent_indices:
-            df.loc[idx, 'G-mean标准差'] = g_mean_std
+        # 计算并添加每个指标的标准差
+        for metric in metrics:
+            # 提取指标值
+            metric_values = filtered_df[metric].values
+            
+            # 计算标准差
+            metric_std = np.std(metric_values, ddof=1)  # 使用样本标准差
+            
+            print(f"{metric}值: {metric_values}")
+            print(f"{metric}标准差: {metric_std:.6f}")
+            
+            # 添加标准差列（如果不存在）
+            std_col_name = f'{metric}标准差'
+            if std_col_name not in df.columns:
+                df[std_col_name] = None
+            
+            # 获取最近num_runs次记录的索引
+            recent_indices = filtered_df.index
+            
+            # 将标准差值添加到这些行
+            for idx in recent_indices:
+                df.loc[idx, std_col_name] = metric_std
         
         # 保存更新后的Excel文件
         df.to_excel(excel_path, index=False, header=True)
-        print(f"G-mean标准差已添加到Excel文件: {excel_path}")
+        print(f"各指标标准差已添加到Excel文件: {excel_path}")
         
         # 使用openpyxl进行单元格合并
         try:
@@ -97,33 +103,37 @@ def calculate_and_update_variance(save_dir, dataset_name, training_ratio, num_ru
             wb = load_workbook(excel_path)
             ws = wb.active
             
-            # 找到G-mean标准差列的位置
-            std_col = None
-            for col in range(1, ws.max_column + 1):
-                if ws.cell(row=1, column=col).value == 'G-mean标准差':
-                    std_col = col
-                    break
+            # 对每个标准差列进行单元格合并
+            for metric in metrics:
+                std_col_name = f'{metric}标准差'
+                
+                # 找到标准差列的位置
+                std_col = None
+                for col in range(1, ws.max_column + 1):
+                    if ws.cell(row=1, column=col).value == std_col_name:
+                        std_col = col
+                        break
+                
+                if std_col:
+                    # 找到需要合并的行范围（最近num_runs次记录）
+                    start_row = recent_indices[0] + 2  # +2 因为Excel从1开始，且有标题行
+                    end_row = recent_indices[-1] + 2
+                    
+                    # 合并单元格
+                    if len(recent_indices) > 1:
+                        merge_range = f"{ws.cell(row=start_row, column=std_col).coordinate}:{ws.cell(row=end_row, column=std_col).coordinate}"
+                        ws.merge_cells(merge_range)
+                        
+                        # 设置居中对齐
+                        merged_cell = ws.cell(row=start_row, column=std_col)
+                        merged_cell.alignment = Alignment(horizontal='center', vertical='center')
+                        merged_cell.value = df.loc[recent_indices[0], std_col_name]
+                        
+                        print(f"已合并单元格 {merge_range} 并设置{std_col_name}值")
             
-            if std_col:
-                # 找到需要合并的行范围（最近num_runs次记录）
-                start_row = recent_indices[0] + 2  # +2 因为Excel从1开始，且有标题行
-                end_row = recent_indices[-1] + 2
-                
-                # 合并单元格
-                if len(recent_indices) > 1:
-                    merge_range = f"{ws.cell(row=start_row, column=std_col).coordinate}:{ws.cell(row=end_row, column=std_col).coordinate}"
-                    ws.merge_cells(merge_range)
-                    
-                    # 设置居中对齐
-                    merged_cell = ws.cell(row=start_row, column=std_col)
-                    merged_cell.alignment = Alignment(horizontal='center', vertical='center')
-                    merged_cell.value = g_mean_std
-                    
-                    print(f"已合并单元格 {merge_range} 并设置G-mean标准差值")
-                
-                # 保存工作簿
-                wb.save(excel_path)
-                print("Excel文件更新完成，单元格已合并")
+            # 保存工作簿
+            wb.save(excel_path)
+            print("Excel文件更新完成，单元格已合并")
             
         except ImportError:
             print("警告: 未安装openpyxl，无法进行单元格合并")
@@ -134,13 +144,13 @@ def calculate_and_update_variance(save_dir, dataset_name, training_ratio, num_ru
         print(f"处理Excel文件时出错: {e}")
 
 class MyRL():
-    def __init__(self, input_shape, rho=0.01, model_type='Q_Net_image', reward_multiplier=1.0, discount_factor=0.1):
+    def __init__(self, input_shape, rho=0.01, model_type='Q_Net_image', reward_multiplier=1.0, discount_factor=0.1, num_classes=9):
 
         self.discount_factor = discount_factor  # 使用传入的折扣因子参数
         self.mem_size = 50000
         self.rho = rho
         self.reward_multiplier = reward_multiplier  # 保存奖励倍数
-        self.lambda_value = rho * reward_multiplier  # 使用不平衡率乘以倍数作为奖励值
+        self.num_classes = num_classes  # 类别数量（默认为9个类别）
         self.t_max = 120000
         self.eta = 0.05
         self.learning_rate = 0.00025
@@ -150,46 +160,46 @@ class MyRL():
         # 添加用于记录损失的列表
         self.loss_history = []
         
-        # 根据模型类型选择网络
+        # 根据模型类型选择网络，输出维度改为num_classes
         if model_type == 'Q_Net_image':
-            self.q_net = Q_Net_image(input_shape, output_dim=2)
-            self.target_net = Q_Net_image(input_shape, output_dim=2)
+            self.q_net = Q_Net_image(input_shape, output_dim=num_classes)
+            self.target_net = Q_Net_image(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d':
-            self.q_net = TBM_conv1d(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d_1layer':
-            self.q_net = TBM_conv1d_1layer(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d_1layer(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d_1layer(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d_1layer(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d_3layer':
-            self.q_net = TBM_conv1d_3layer(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d_3layer(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d_3layer(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d_3layer(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d_4layer':
-            self.q_net = TBM_conv1d_4layer(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d_4layer(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d_4layer(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d_4layer(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d_5layer':
-            self.q_net = TBM_conv1d_5layer(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d_5layer(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d_5layer(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d_5layer(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d_6layer':
-            self.q_net = TBM_conv1d_6layer(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d_6layer(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d_6layer(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d_6layer(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d_7layer':
-            self.q_net = TBM_conv1d_7layer(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d_7layer(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d_7layer(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d_7layer(input_shape, output_dim=num_classes)
         elif model_type == 'TBM_conv1d_8layer':
-            self.q_net = TBM_conv1d_8layer(input_shape, output_dim=2)
-            self.target_net = TBM_conv1d_8layer(input_shape, output_dim=2)
+            self.q_net = TBM_conv1d_8layer(input_shape, output_dim=num_classes)
+            self.target_net = TBM_conv1d_8layer(input_shape, output_dim=num_classes)
         elif model_type == 'ResNet32_1D':
-            self.q_net = ResNet32_1D(input_shape, output_dim=2)
-            self.target_net = ResNet32_1D(input_shape, output_dim=2)
+            self.q_net = ResNet32_1D(input_shape, output_dim=num_classes)
+            self.target_net = ResNet32_1D(input_shape, output_dim=num_classes)
         elif model_type == 'LSTM':
-            self.q_net = LSTM(input_shape, output_dim=2)
-            self.target_net = LSTM(input_shape, output_dim=2)
+            self.q_net = LSTM(input_shape, output_dim=num_classes)
+            self.target_net = LSTM(input_shape, output_dim=num_classes)
         elif model_type == 'BiLSTM':
-            self.q_net = BiLSTM(input_shape, output_dim=2)
-            self.target_net = BiLSTM(input_shape, output_dim=2)
+            self.q_net = BiLSTM(input_shape, output_dim=num_classes)
+            self.target_net = BiLSTM(input_shape, output_dim=num_classes)
         elif model_type == 'Transformer':
-            self.q_net = Transformer(input_shape, output_dim=2)
-            self.target_net = Transformer(input_shape, output_dim=2)
+            self.q_net = Transformer(input_shape, output_dim=num_classes)
+            self.target_net = Transformer(input_shape, output_dim=num_classes)
         else:
             raise ValueError(f"不支持的模型类型: {model_type}")
         
@@ -216,32 +226,40 @@ class MyRL():
 
         # 存储模型类型，用于后续数据预处理
         self.model_type = model_type
+        
+        # 奖励权重字典 - 将从数据集中获取
+        self.reward_weights = {}
+
+    def set_reward_weights(self, reward_weights):
+        """设置各类别的奖励权重"""
+        self.reward_weights = reward_weights
+        print(f"已设置奖励权重: {self.reward_weights}")
 
     def compute_reward(self, action, label):
         """
-        实现论文中的奖励函数 (Section 3.2)
+        多分类问题的奖励函数
         Args:
-            action: 预测的类别 (0或1)
-            label: 真实的类别 (0表示少数类，1表示多数类)
+            action: 预测的类别 (0-8)
+            label: 真实的类别 (0-8)
         Returns:
             reward: 奖励值
             terminal: 是否终止当前episode
         """
         terminal = False
-        # 少数类样本 (标签0)
-        if label == 0:
-            if action == label:
-                reward = 1.0  # 正确分类少数类
-            else:
-                reward = -1.0  # 错误分类少数类
-                terminal = True  # 终止当前episode
-        # 多数类样本 (标签1)
+        
+        # 获取当前类别的奖励权重（如果不存在则默认为1.0）
+        weight = self.reward_weights.get(label, 1.0)
+        
+        # 预测正确的情况
+        if action == label:
+            reward = weight * self.reward_multiplier  # 正确分类奖励，乘以权重和倍率
+        # 预测错误的情况
         else:
-            if action == label:
-                reward = self.lambda_value  # 正确分类多数类
-            else:
-                reward = -self.lambda_value  # 错误分类多数类
-                # 注意: 多数类错误不终止episode
+            reward = -weight * self.reward_multiplier  # 错误分类惩罚，乘以权重和倍率
+            # 如果错分类别8（最少样本），则终止episode
+            if label == 8:
+                terminal = True
+                
         return reward, terminal
 
     def replay_experience(self, update_target=True):
@@ -304,7 +322,12 @@ class MyRL():
         """
         # 获取完整数据集
         train_data, train_labels, _, _ = dataset.get_full_dataset()
-       # print(f"训练数据集维度: {train_data.shape}, 标签维度: {train_labels.shape}") torch.Size([14136, 1024, 3])
+        
+        # 从数据集获取奖励权重
+        dist_info = dataset.get_class_distribution()
+        if dist_info["reward_weights"] is not None:
+            self.set_reward_weights(dist_info["reward_weights"])
+            
         self.step_count = 0
         episode = 0
         
@@ -356,7 +379,7 @@ class MyRL():
                 
                 # 根据ε-greedy策略选择动作 (Choose an action based on ε-greedy policy)
                 if random.random() < self.epsilon:
-                    action = random.randint(0, 1)  # 随机探索
+                    action = random.randint(0, self.num_classes - 1)  # 随机探索，范围0-8
                 else:
                     with torch.no_grad():
                         q_values = self.q_net(current_state)
@@ -509,9 +532,7 @@ def main():
     
     # 创建TBM数据集配置列表，每个元素包含数据集名称和对应的rho值
     tbm_configs = [
-        # ('TBM_K_M_Noise', 0.01),
-        ('TBM_K_M_Noise', 0.008),  # 添加新的不平衡率
-        ('TBM_K_M_Noise', 0.005)
+        ('TBM_K_M_Noise', 0.01),  # 使用统一的数据集名称，我们将在ImbalancedDataset类中读取指定文件
     ]
     
     # 定义要测试的奖励倍数列表
@@ -521,16 +542,16 @@ def main():
     discount_factors = [0.1]
     
     # 使用固定的模型变体
-    model_variant = ['TBM_conv1d_1layer', 'TBM_conv1d', 'TBM_conv1d_3layer', 'TBM_conv1d_5layer', 'TBM_conv1d_6layer', 'TBM_conv1d_7layer', 'TBM_conv1d_8layer']
+    model_variants = ['TBM_conv1d_1layer', 'TBM_conv1d', 'TBM_conv1d_3layer']
     
     # 使用绝对路径
-    save_dir = '/workspace/RL/DQNimb/layer_compare_results'
+    save_dir = '/workspace/RL/DQNimb/multi_class_results'
     
     # 创建保存目录（如果不存在）
     os.makedirs(save_dir, exist_ok=True)
     
-    # 五重循环：先遍历模型变体，数据集配置，再遍历奖励倍数，再遍历折扣因子，最后进行多次运行
-    for model_variant in model_variant:
+    # 多重循环：先遍历模型变体，数据集配置，再遍历奖励倍数和折扣因子
+    for model_variant in model_variants:
         for dataset_name, rho in tbm_configs:
             for reward_multiplier in reward_multipliers:
                 for discount_factor in discount_factors:
@@ -547,15 +568,18 @@ def main():
                     print(f"数据集: {dataset_name}")
                     print(f"选择的模型类型: {model_type}")
                     print(f"输入形状: {input_shape}")
-                    print(f"奖励倍数: {reward_multiplier}, 实际奖励值: {rho * reward_multiplier}")
+                    print(f"奖励倍数: {reward_multiplier}")
                     print(f"折扣因子: {discount_factor}")
                     
                     try:
-                        # 创建不平衡数据集
+                        # 创建数据集
                         dataset = ImbalancedDataset(dataset_name=dataset_name, rho=rho, batch_size=64)
                             
                         # 直接获取训练和测试的dataloader
                         train_loader, test_loader = dataset.get_dataloaders()
+                        
+                        # 获取分类数量
+                        num_classes = 9  # 固定为9个类别（0-8）
                         
                         if TEST_ONLY:
                             print("测试模式: 加载多个模型并分别评估")
@@ -564,9 +588,9 @@ def main():
                             num_runs = 10
                             training_ratio = 1  # 使用与训练时相同的ratio
                             
-                            # 根据模型类型创建相应的模型
-                            if model_type == 'TBM_conv1d_4layer':
-                                q_net = TBM_conv1d_4layer(input_shape, output_dim=2)
+                            # 根据模型类型创建相应的模型，指定输出维度为9
+                            if model_type == 'TBM_conv1d':
+                                q_net = TBM_conv1d(input_shape, output_dim=num_classes)
                             else:
                                 raise ValueError(f"不支持的模型类型: {model_type}")
                             
@@ -610,7 +634,8 @@ def main():
                                 
                                 # 每次创建新的分类器实例，传入模型类型、奖励倍数和折扣因子
                                 classifier = MyRL(input_shape, rho=rho, model_type=model_type, 
-                                                reward_multiplier=reward_multiplier, discount_factor=discount_factor)
+                                                reward_multiplier=reward_multiplier, discount_factor=discount_factor,
+                                                num_classes=num_classes)
                                 
                                 # 开始训练，直接使用数据集对象而不是dataloader
                                 classifier.train(dataset)
