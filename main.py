@@ -256,9 +256,7 @@ class MyRL():
         # 预测错误的情况
         else:
             reward = -weight * self.reward_multiplier  # 错误分类惩罚，乘以权重和倍率
-            # 如果错分类别8（最少样本），则终止episode
-            if label == 8:
-                terminal = True
+            terminal = True
                 
         return reward, terminal
 
@@ -347,18 +345,18 @@ class MyRL():
             current_state = shuffled_data[0:1]
             
             # 根据模型类型进行不同的数据预处理
-            if self.model_type == 'TBM_conv1d':
-                # TBM数据不需要添加通道维度，直接使用原始形状
-                current_state = current_state.float().to(self.device)
-            else:
-                # 图像数据需要添加通道维度
-                if len(current_state.shape) == 3:
-                    current_state = current_state.unsqueeze(1)  # 添加通道维度
-                current_state = current_state.float().to(self.device)
+            # if self.model_type == 'TBM_conv1d':
+            #     # TBM数据不需要添加通道维度，直接使用原始形状
+            #     current_state = current_state.float().to(self.device)
+            # else:
+            #     # 图像数据需要添加通道维度
+            #     if len(current_state.shape) == 3:
+            #         current_state = current_state.unsqueeze(1)  # 添加通道维度
+            #     current_state = current_state.float().to(self.device)
                 
-                # 修正通道顺序
-                if current_state.shape[1] != 3 and current_state.shape[-1] == 3:
-                    current_state = current_state.permute(0, 3, 1, 2)  # NHWC -> NCHW
+            #     # 修正通道顺序
+            #     if current_state.shape[1] != 3 and current_state.shape[-1] == 3:
+            #         current_state = current_state.permute(0, 3, 1, 2)  # NHWC -> NCHW
             
             # 进度条显示
             episode_pbar = tqdm(
@@ -532,7 +530,7 @@ def main():
     
     # 创建TBM数据集配置列表，每个元素包含数据集名称和对应的rho值
     tbm_configs = [
-        ('TBM_K_M_Noise', 0.01),  # 使用统一的数据集名称，我们将在ImbalancedDataset类中读取指定文件
+        ('TBM', 0.001),  # 使用统一的数据集名称，我们将在ImbalancedDataset类中读取指定文件
     ]
     
     # 定义要测试的奖励倍数列表
@@ -542,7 +540,7 @@ def main():
     discount_factors = [0.1]
     
     # 使用固定的模型变体
-    model_variants = ['TBM_conv1d_1layer', 'TBM_conv1d', 'TBM_conv1d_3layer']
+    model_variants = ['TBM_conv1d_4layer']
     
     # 使用绝对路径
     save_dir = '/workspace/RL/DQNimb/multi_class_results'
@@ -623,7 +621,7 @@ def main():
                             print("训练模式: 将进行模型训练和评估")
 
                             # 运行10次训练
-                            num_runs = 10
+                            num_runs = 2
                             print(f"开始进行 {num_runs} 次训练，模型类型: {model_type}, 奖励倍数: {reward_multiplier}, 折扣因子: {discount_factor}")
                             for run in range(1, num_runs + 1):
                                 
