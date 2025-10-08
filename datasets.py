@@ -2,6 +2,7 @@ import torch
 import torchvision
 import numpy as np
 import h5py
+import os
 from torch.utils.data import DataLoader, Subset, TensorDataset
 # from sklearn.model_selection import train_test_split
 
@@ -82,7 +83,7 @@ class ImbalancedDataset:
         elif "TBM" in self.dataset_name:
             # 所有TBM数据集使用统一的文件路径
             print(f"正在加载TBM训练集...")
-            train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
+            train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
             
             print(f"正在加载TBM测试集...")
             test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
@@ -164,11 +165,22 @@ class ImbalancedDataset:
         生成训练和测试 DataLoader
         :return: (train_loader, test_loader)
         """
+        # 根据系统CPU核心数设置工作进程数，但不超过8个
+        num_workers = min(8, os.cpu_count() or 4)
+        
         train_loader = DataLoader(
-            self.train_data, batch_size=self.batch_size, shuffle=True
+            self.train_data, 
+            batch_size=self.batch_size, 
+            shuffle=True,
+            num_workers=num_workers,  # 多线程数据加载
+            pin_memory=True  # 将数据加载到固定内存，加速CPU到GPU的数据传输
         )
         test_loader = DataLoader(
-            self.test_data, batch_size=self.batch_size, shuffle=False
+            self.test_data, 
+            batch_size=self.batch_size, 
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
         )
         return train_loader, test_loader
         

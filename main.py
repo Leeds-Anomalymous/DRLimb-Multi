@@ -14,6 +14,10 @@ from datasets import ImbalancedDataset
 from Model import Q_Net_image, TBM_conv1d, TBM_conv1d_1layer, TBM_conv1d_3layer, TBM_conv1d_4layer, TBM_conv1d_5layer, TBM_conv1d_6layer, TBM_conv1d_7layer, TBM_conv1d_8layer, ResNet32_1D, LSTM, BiLSTM, Transformer  # 导入所有模型类
 from evaluate import evaluate_model  # 导入评估模块
 import pandas as pd
+# 导入混合精度训练所需的模块
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
+import os
 
 def set_random_seed(seed):
     """
@@ -230,6 +234,10 @@ class MyRL():
         # 奖励权重字典 - 将从数据集中获取
         self.reward_weights = {}
 
+        # 添加混合精度训练所需的梯度缩放器
+        self.use_amp = torch.cuda.is_available()  # 只有在CUDA可用时才使用混合精度
+        self.scaler = GradScaler(enabled=self.use_amp)
+
     def set_reward_weights(self, reward_weights):
         """设置各类别的奖励权重"""
         self.reward_weights = reward_weights
@@ -266,32 +274,34 @@ class MyRL():
         batch = random.sample(self.replay_memory, self.batch_size)
         states, actions, rewards, next_states, terminals = zip(*batch)
 
-        # 将数据移动到正确的设备
+        # 将数据移动到正确的设备并确保维度一致
         states = torch.stack(states).to(self.device)
         actions = torch.tensor(actions, dtype=torch.int64, device=self.device).unsqueeze(1)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
         next_states = torch.stack(next_states).to(self.device)
         terminals = torch.tensor(terminals, dtype=torch.bool, device=self.device).unsqueeze(1)
         
-        # 对于TBM模型，确保数据维度正确
-        if self.model_type == 'TBM_conv1d':
-            # TBM模型期望输入形状为[batch, channels, length]
-            # 而我们的数据形状为[batch, length, channels]
-            # 所以需要转置为[batch, channels, length]
-            if states.shape[1] != 3 and states.shape[2] == 3:  # 如果是[batch, length, channels]
+        # 确保数据形状正确 - TBM模型需要[batch, channels, length]格式
+        if self.model_type.startswith('TBM_conv1d'):
+            if states.shape[1] == 1024 and states.shape[2] == 3:  # 如果是[batch, length, channels]
                 states = states.transpose(1, 2)  # 转为[batch, channels, length]
                 next_states = next_states.transpose(1, 2)
 
-        # 计算当前Q值
-        current_q = self.q_net(states).gather(1, actions)
-            
-        # 计算目标Q值
-        with torch.no_grad():
-           next_q = self.target_net(next_states).max(1, keepdim=True)[0]
-           target_q = rewards + self.discount_factor * next_q * (~terminals)
-            
-        # 计算损失并更新
-        loss = F.mse_loss(current_q, target_q)
+        # 使用混合精度训练
+        self.optimizer.zero_grad()
+        
+        # 使用自动混合精度
+        with autocast('cuda', enabled=self.use_amp):
+            # 计算当前Q值
+            current_q = self.q_net(states).gather(1, actions)
+                
+            # 计算目标Q值
+            with torch.no_grad():
+               next_q = self.target_net(next_states).max(1, keepdim=True)[0]
+               target_q = rewards + self.discount_factor * next_q * (~terminals)
+                
+            # 计算损失
+            loss = F.mse_loss(current_q, target_q)
         
         # 记录损失值
         self.loss_history.append(loss.item())
@@ -342,21 +352,7 @@ class MyRL():
             shuffled_labels = train_labels[indices]
             
             # 初始化状态 s_1 = x_1
-            current_state = shuffled_data[0:1]
-            
-            # 根据模型类型进行不同的数据预处理
-            # if self.model_type == 'TBM_conv1d':
-            #     # TBM数据不需要添加通道维度，直接使用原始形状
-            #     current_state = current_state.float().to(self.device)
-            # else:
-            #     # 图像数据需要添加通道维度
-            #     if len(current_state.shape) == 3:
-            #         current_state = current_state.unsqueeze(1)  # 添加通道维度
-            #     current_state = current_state.float().to(self.device)
-                
-            #     # 修正通道顺序
-            #     if current_state.shape[1] != 3 and current_state.shape[-1] == 3:
-            #         current_state = current_state.permute(0, 3, 1, 2)  # NHWC -> NCHW
+            current_state = shuffled_data[0:1].float().to(self.device)
             
             # 进度条显示
             episode_pbar = tqdm(
@@ -380,36 +376,26 @@ class MyRL():
                     action = random.randint(0, self.num_classes - 1)  # 随机探索，范围0-8
                 else:
                     with torch.no_grad():
-                        q_values = self.q_net(current_state)
+                        # 确保输入维度正确
+                        model_input = current_state
+                        if self.model_type.startswith('TBM_conv1d'):
+                            if model_input.shape[1] == 1024 and model_input.shape[2] == 3:
+                                model_input = model_input.transpose(1, 2)
+                        q_values = self.q_net(model_input)
                     action = q_values.argmax().item()
                 
                 # 计算奖励和终止标志 (r_t, terminal_t = STEP(a_t, l_t))
                 reward, terminal = self.compute_reward(action, current_label)
                 
                 # 获取下一状态 (Set s_{t+1} = x_{t+1})
-                next_state = shuffled_data[t+1:t+2]
+                next_state = shuffled_data[t+1:t+2].float().to(self.device)
                 
-                # 根据模型类型进行不同的数据预处理
-                if self.model_type == 'TBM_conv1d':
-                    # TBM数据不需要添加通道维度
-                    next_state = next_state.float().to(self.device)
-                else:
-                    # 图像数据需要添加通道维度
-                    if len(next_state.shape) == 3:
-                        next_state = next_state.unsqueeze(1)
-                    next_state = next_state.float().to(self.device)
-                    
-                    # 修正通道顺序
-                    if next_state.shape[1] != 3 and next_state.shape[-1] == 3:
-                        next_state = next_state.permute(0, 3, 1, 2)
-                
-                # 存储经验到记忆库 (Store (s_t, a_t, r_t, s_{t+1}, terminal_t) to M)
+                # 存储经验到记忆库 - 保持原始形状一致
                 self.replay_memory.append((
-                    # 直接存储原始形状，不进行维度转换
-                    current_state.squeeze(0).cpu().clone().detach(),
+                    current_state.squeeze(0).cpu().clone().detach(),  # 保持原始形状
                     action,
                     reward,
-                    next_state.squeeze(0).cpu().clone().detach(),
+                    next_state.squeeze(0).cpu().clone().detach(),  # 保持原始形状
                     terminal
                 ))
                 
@@ -468,60 +454,60 @@ class MyRL():
         plt.close()
         print(f"损失曲线已保存到 {save_path}")
 
-def get_model_config(dataset_name, model_variant=None):
-    """
-    根据数据集名称和模型变体返回相应的模型配置
+# def get_model_config(dataset_name, model_variant=None):
+#     """
+#     根据数据集名称和模型变体返回相应的模型配置
     
-    Args:
-        dataset_name: 数据集名称
-        model_variant: 模型变体，例如 'TBM_conv1d_1layer'
+#     Args:
+#         dataset_name: 数据集名称
+#         model_variant: 模型变体，例如 'TBM_conv1d_1layer'
         
-    Returns:
-        dict: 包含模型类型和输入形状的配置
-    """
-    # 图像数据集配置
-    image_datasets = {
-        'mnist': {'model_type': 'Q_Net_image', 'input_shape': (1, 28, 28)},
-        'fashion_mnist': {'model_type': 'Q_Net_image', 'input_shape': (1, 28, 28)},
-        'cifar10': {'model_type': 'Q_Net_image', 'input_shape': (3, 32, 32)},
-        'cifar100': {'model_type': 'Q_Net_image', 'input_shape': (3, 32, 32)},
-    }
+#     Returns:
+#         dict: 包含模型类型和输入形状的配置
+#     """
+#     # 图像数据集配置
+#     image_datasets = {
+#         'mnist': {'model_type': 'Q_Net_image', 'input_shape': (1, 28, 28)},
+#         'fashion_mnist': {'model_type': 'Q_Net_image', 'input_shape': (1, 28, 28)},
+#         'cifar10': {'model_type': 'Q_Net_image', 'input_shape': (3, 32, 32)},
+#         'cifar100': {'model_type': 'Q_Net_image', 'input_shape': (3, 32, 32)},
+#     }
     
-    # TBM数据集配置 - 使用1D卷积模型
-    tbm_datasets = {
-        'TBM_K': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},  # (len_window, feature_dim)
-        'TBM_M': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_Noise': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_M_Noise': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        # 添加新的数据集配置
-        'TBM_K_M_Noise_snr_3': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise_snr_1': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise_snr_0': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise_snr_-1': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise_snr_-3': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise_snr_-5': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise_snr_-7': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-        'TBM_K_M_Noise_snr_-10': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
-    }
+#     # TBM数据集配置 - 使用1D卷积模型
+#     tbm_datasets = {
+#         'TBM_K': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},  # (len_window, feature_dim)
+#         'TBM_M': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_Noise': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_M_Noise': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         # 添加新的数据集配置
+#         'TBM_K_M_Noise_snr_3': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise_snr_1': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise_snr_0': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise_snr_-1': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise_snr_-3': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise_snr_-5': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise_snr_-7': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#         'TBM_K_M_Noise_snr_-10': {'model_type': 'TBM_conv1d', 'input_shape': (1024, 3)},
+#     }
     
-    # 如果指定了模型变体，直接使用
-    if model_variant:
-        if dataset_name in tbm_datasets:
-            config = tbm_datasets[dataset_name].copy()
-            config['model_type'] = model_variant
-            return config
+#     # 如果指定了模型变体，直接使用
+#     if model_variant:
+#         if dataset_name in tbm_datasets:
+#             config = tbm_datasets[dataset_name].copy()
+#             config['model_type'] = model_variant
+#             return config
     
-    # 合并配置
-    all_configs = {**image_datasets, **tbm_datasets}
+#     # 合并配置
+#     all_configs = {**image_datasets, **tbm_datasets}
     
-    if dataset_name in all_configs:
-        return all_configs[dataset_name]
-    else:
-        # 默认使用图像模型
-        print(f"警告: 未找到数据集 {dataset_name} 的配置，使用默认图像模型配置")
-        return {'model_type': 'Q_Net_image', 'input_shape': (1, 28, 28)}
+#     if dataset_name in all_configs:
+#         return all_configs[dataset_name]
+#     else:
+#         # 默认使用图像模型
+#         print(f"警告: 未找到数据集 {dataset_name} 的配置，使用默认图像模型配置")
+#         return {'model_type': 'Q_Net_image', 'input_shape': (1, 28, 28)}
 
 
 def main():
@@ -559,9 +545,8 @@ def main():
                     print(f"{'='*70}")
                     
                     # 获取模型配置
-                    model_config = get_model_config(dataset_name, model_variant)
-                    model_type = model_config['model_type']
-                    input_shape = model_config['input_shape']
+                    model_type = model_variant  # 使用指定的模型变体
+                    input_shape = (1024, 3)  # 固定为TBM数据的输入形状
                     
                     print(f"数据集: {dataset_name}")
                     print(f"选择的模型类型: {model_type}")
@@ -589,6 +574,28 @@ def main():
                             # 根据模型类型创建相应的模型，指定输出维度为9
                             if model_type == 'TBM_conv1d':
                                 q_net = TBM_conv1d(input_shape, output_dim=num_classes)
+                            elif model_type == 'TBM_conv1d_1layer':
+                                q_net = TBM_conv1d_1layer(input_shape, output_dim=num_classes)
+                            elif model_type == 'TBM_conv1d_3layer':
+                                q_net = TBM_conv1d_3layer(input_shape, output_dim=num_classes)
+                            elif model_type == 'TBM_conv1d_4layer':
+                                q_net = TBM_conv1d_4layer(input_shape, output_dim=num_classes)
+                            elif model_type == 'TBM_conv1d_5layer':
+                                q_net = TBM_conv1d_5layer(input_shape, output_dim=num_classes)
+                            elif model_type == 'TBM_conv1d_6layer':
+                                q_net = TBM_conv1d_6layer(input_shape, output_dim=num_classes)
+                            elif model_type == 'TBM_conv1d_7layer':
+                                q_net = TBM_conv1d_7layer(input_shape, output_dim=num_classes)
+                            elif model_type == 'TBM_conv1d_8layer':
+                                q_net = TBM_conv1d_8layer(input_shape, output_dim=num_classes)
+                            elif model_type == 'ResNet32_1D':
+                                q_net = ResNet32_1D(input_shape, output_dim=num_classes)
+                            elif model_type == 'LSTM':
+                                q_net = LSTM(input_shape, output_dim=num_classes)
+                            elif model_type == 'BiLSTM':
+                                q_net = BiLSTM(input_shape, output_dim=num_classes)
+                            elif model_type == 'Transformer':
+                                q_net = Transformer(input_shape, output_dim=num_classes)
                             else:
                                 raise ValueError(f"不支持的模型类型: {model_type}")
                             
@@ -620,7 +627,7 @@ def main():
                         else:
                             print("训练模式: 将进行模型训练和评估")
 
-                            # 运行10次训练
+                            # 运行2次训练
                             num_runs = 2
                             print(f"开始进行 {num_runs} 次训练，模型类型: {model_type}, 奖励倍数: {reward_multiplier}, 折扣因子: {discount_factor}")
                             for run in range(1, num_runs + 1):
@@ -678,8 +685,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# python /workspace/RL/DQNimb/main.py
 
 
 
