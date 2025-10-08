@@ -50,43 +50,72 @@ class ImbalancedDataset:
                 root='./data', train=False, download=True, transform=transform
             )
             return train_set, test_set
-        elif self.dataset_name == "cifar10":
-            # CIFAR-10支持
-            # 数据增强：训练集用标准增强，测试集只做归一化
-            train_transform = torchvision.transforms.Compose([
-                torchvision.transforms.RandomCrop(32, padding=4),
-                torchvision.transforms.RandomHorizontalFlip(),
-                torchvision.transforms.ToTensor(),
-                torchvision.transforms.Normalize(
-                    (0.4914, 0.4822, 0.4465), 
-                    (0.2470, 0.2435, 0.2616)
-                )
-            ])
-            test_transform = torchvision.transforms.Compose([
-                torchvision.transforms.ToTensor(),
-                torchvision.transforms.Normalize(
-                    (0.4914, 0.4822, 0.4465), 
-                    (0.2470, 0.2435, 0.2616)
-                )
-            ])
-      
-            print("正在下载CIFAR-10训练集...")
-            train_set = torchvision.datasets.CIFAR10(
-                root='./data', train=True, download=True, transform=train_transform
-            )
+        elif self.dataset_name == "TBM_0.01":
+            # 所有TBM数据集使用统一的文件路径
+            print(f"正在加载TBM训练集...")
+            train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.01_head10000.h5')
             
-            print("正在下载CIFAR-10测试集...")
-            test_set = torchvision.datasets.CIFAR10(
-                root='./data', train=False, download=True, transform=test_transform
-            )
+            print(f"正在加载TBM测试集...")
+            test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05.h5')
+            
+            # 创建训练集和测试集
+            train_set = self._create_dataset_from_arrays(train_data, train_labels)
+            test_set = self._create_dataset_from_arrays(test_data, test_labels)
+            
             return train_set, test_set
-        elif "TBM" in self.dataset_name:
+        elif self.dataset_name == "TBM_fault_0.01":
+            # 加载TBM数据集并过滤掉label=0的样本
+            print(f"正在加载TBM故障训练集（过滤正常样本）...")
+            train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.01_head10000.h5')
+            
+            # 过滤掉标签为0的样本
+            fault_indices = train_labels != 0
+            train_data = train_data[fault_indices]
+            train_labels = train_labels[fault_indices]
+            
+            print(f"正在加载TBM故障测试集（过滤正常样本）...")
+            test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05.h5')
+            
+            # 过滤掉标签为0的样本
+            fault_indices = test_labels != 0
+            test_data = test_data[fault_indices]
+            test_labels = test_labels[fault_indices]
+            
+            # 创建训练集和测试集
+            train_set = self._create_dataset_from_arrays(train_data, train_labels)
+            test_set = self._create_dataset_from_arrays(test_data, test_labels)
+            
+            return train_set, test_set
+        elif self.dataset_name== "TBM_0.001":
             # 所有TBM数据集使用统一的文件路径
             print(f"正在加载TBM训练集...")
             train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
             
             print(f"正在加载TBM测试集...")
-            test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
+            test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05.h5')
+            
+            # 创建训练集和测试集
+            train_set = self._create_dataset_from_arrays(train_data, train_labels)
+            test_set = self._create_dataset_from_arrays(test_data, test_labels)
+            
+            return train_set, test_set
+        elif self.dataset_name == "TBM_fault_0.001":
+            # 加载TBM数据集并过滤掉label=0的样本
+            print(f"正在加载TBM故障训练集（过滤正常样本）...")
+            train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
+            
+            # 过滤掉标签为0的样本
+            fault_indices = train_labels != 0
+            train_data = train_data[fault_indices]
+            train_labels = train_labels[fault_indices]
+            
+            print(f"正在加载TBM故障测试集（过滤正常样本）...")
+            test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05.h5')
+            
+            # 过滤掉标签为0的样本
+            fault_indices = test_labels != 0
+            test_data = test_data[fault_indices]
+            test_labels = test_labels[fault_indices]
             
             # 创建训练集和测试集
             train_set = self._create_dataset_from_arrays(train_data, train_labels)
@@ -165,22 +194,16 @@ class ImbalancedDataset:
         生成训练和测试 DataLoader
         :return: (train_loader, test_loader)
         """
-        # 根据系统CPU核心数设置工作进程数，但不超过8个
-        num_workers = min(8, os.cpu_count() or 4)
         
         train_loader = DataLoader(
             self.train_data, 
             batch_size=self.batch_size, 
-            shuffle=True,
-            num_workers=num_workers,  # 多线程数据加载
-            pin_memory=True  # 将数据加载到固定内存，加速CPU到GPU的数据传输
+            shuffle=True
         )
         test_loader = DataLoader(
             self.test_data, 
             batch_size=self.batch_size, 
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True
+            shuffle=False
         )
         return train_loader, test_loader
         

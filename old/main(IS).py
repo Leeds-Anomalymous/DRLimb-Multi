@@ -208,7 +208,7 @@ class MyRL():
         # 优化器
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.learning_rate)
 
-        # 经验回放池
+        # 经验回放池 - 不再存储imp_factor
         self.replay_memory = deque(maxlen=self.mem_size)
 
         # 设备配置
@@ -235,44 +235,102 @@ class MyRL():
         self.reward_weights = reward_weights
         print(f"已设置奖励权重: {self.reward_weights}")
 
-    def compute_reward(self, action, label):
-        """
-        多分类问题的奖励函数
-        Args:
-            action: 预测的类别 (0-8)
-            label: 真实的类别 (0-8)
-        Returns:
-            reward: 奖励值
-            terminal: 是否终止当前episode
-        """
-        terminal = False
-        
-        # 获取当前类别的奖励权重（如果不存在则默认为1.0）
-        weight = self.reward_weights.get(label, 1.0)
-        
-        # 预测正确的情况
-        if action == label:
-            reward = weight * self.reward_multiplier  # 正确分类奖励，乘以权重和倍率
-        # 预测错误的情况
-        else:
-            reward = -weight * self.reward_multiplier  # 错误分类惩罚，乘以权重和倍率
-            terminal = True
+    # def compute_reward(self, action, label):
+    #     """
+    #     多分类问题的奖励函数
+    #     Args:
+    #         action: 预测的类别
+    #         label: 真实的类别
+    #     Returns:
+    #         reward: 奖励值
+    #         terminal: 是否终止当前episode
+    #     """
+    #     # 获取当前类别的奖励权重
+    #     weight = self.reward_weights[label]
+    #     # print(f"当前类别: {label}, 奖励权重: {weight}")
+    #     # terminal = False
+    #     # 预测正确的情况
+    #     # imp_factor=1
+    #     if action == label:
+    #         reward = weight * self.reward_multiplier  # 正确分类奖励，乘以权重和倍率
+    #         imp_factor = 1
+    #     # 预测错误的情况
+    #     else:
+    #         reward = -weight * self.reward_multiplier  # 错误分类惩罚，乘以权重和倍率
+    #         imp_factor = 1 - weight
                 
-        return reward, terminal
+    #     return reward, imp_factor
 
-    def replay_experience(self, update_target=True):
+    def compute_reward_batch(self, actions, labels):
+        """
+        批量计算多分类问题的奖励函数，使用重要性采样实现类别平衡
+        
+        Args:
+            actions: 预测的类别张量 [batch_size]
+            labels: 真实的类别张量 [batch_size]
+        Returns:
+            rewards: 奖励值张量 [batch_size]
+            imp_factors: 重要性因子张量 [batch_size]
+        """
+        # 获取每个标签对应的权重
+        batch_size = labels.size(0)
+        weights = torch.tensor([self.reward_weights[label.item()] for label in labels], 
+                               dtype=torch.float32, 
+                               device=self.device)
+        
+        # 计算正确/错误的掩码
+        correct_mask = (actions == labels)
+        
+        # 初始化奖励张量
+        rewards = torch.zeros_like(weights)
+        
+        # 为正确的预测设置奖励
+        rewards[correct_mask] = weights[correct_mask] * self.reward_multiplier
+        
+        # 为错误的预测设置奖励
+        rewards[~correct_mask] = -weights[~correct_mask] * self.reward_multiplier
+        
+        # # 计算类别频率
+        # label_counts = torch.bincount(labels, minlength=self.num_classes).float()
+        # class_frequencies = label_counts / label_counts.sum()
+        
+        # # 向量化处理：为每个样本分配对应的类别频率
+        # # 添加一个小的常数避免除零错误
+        # class_frequencies = torch.clamp(class_frequencies, min=1e-10)
+        
+        # # 创建频率查找表并应用于标签
+        # frequencies = class_frequencies[labels]
+        
+        # # 批量计算重要性因子：频率倒数乘以类别数（归一化）
+        # imp_factors = 1.0 / (frequencies * self.num_classes)
+        
+        return rewards
+
+    def replay_experience(self):
         """从经验回放缓冲区采样并训练网络"""                
         # 随机采样一批经验
         batch = random.sample(self.replay_memory, self.batch_size)
-        states, actions, rewards, next_states, terminals = zip(*batch)
+        states, actions, rewards, next_states, labels = zip(*batch)
 
         # 将数据移动到正确的设备并确保维度一致
         states = torch.stack(states).to(self.device)
         actions = torch.tensor(actions, dtype=torch.int64, device=self.device).unsqueeze(1)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
         next_states = torch.stack(next_states).to(self.device)
-        terminals = torch.tensor(terminals, dtype=torch.bool, device=self.device).unsqueeze(1)
+        labels = torch.tensor(labels, dtype=torch.int64, device=self.device)
         
+        # 在抽样时计算重要性因子
+        # 计算当前批次的类别分布
+        label_counts = torch.bincount(labels, minlength=self.num_classes).float()
+        class_frequencies = label_counts / label_counts.sum()
+        class_frequencies = torch.clamp(class_frequencies, min=1e-10)
+        
+        # 为每个样本获取对应的类别频率
+        frequencies = class_frequencies[labels]
+        
+        # 计算重要性因子
+        imp_factors = (1.0 / (frequencies * self.num_classes)).unsqueeze(1).to(self.device)
+
         # 确保数据形状正确 - TBM模型需要[batch, channels, length]格式
         if self.model_type.startswith('TBM_conv1d'):
             if states.shape[1] == 1024 and states.shape[2] == 3:  # 如果是[batch, length, channels]
@@ -284,25 +342,24 @@ class MyRL():
             
         # 计算目标Q值
         with torch.no_grad():
-           next_q = self.target_net(next_states).max(1, keepdim=True)[0]
-           target_q = rewards + self.discount_factor * next_q * (~terminals)
-            
-        # 计算损失并更新
+            next_q = self.target_net(next_states).max(1, keepdim=True)[0]
+            target_q = rewards + self.discount_factor * next_q * imp_factors  # 使用新计算的重要性因子
+        
+        # 计算损失
         loss = F.mse_loss(current_q, target_q)
         
         # 记录损失值
         self.loss_history.append(loss.item())
 
-        # 清零梯度，反向传播，更新参数
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
             
         # 更新目标网络 (软更新)，只在update_target为True时更新
         # 更新参数 φ := (1-η)φ + ηθ
-        if update_target:
-            for target_param, param in zip(self.target_net.parameters(), self.q_net.parameters()):
-                target_param.data.copy_(self.eta * param.data + (1.0 - self.eta) * target_param.data)
+        for target_param, param in zip(self.target_net.parameters(), self.q_net.parameters()):
+            target_param.data.copy_(self.eta * param.data + (1.0 - self.eta) * target_param.data)
             
         # 衰减探索率
         if self.epsilon > self.epsilon_min:
@@ -311,113 +368,97 @@ class MyRL():
 
     def train(self, dataset):
         """
-        按照论文Algorithm 2训练DQN分类器
+        按照批处理方式训练DQN分类器
         Args:
             dataset: 数据集对象
         """
-        # 获取完整数据集
-        train_data, train_labels, _, _ = dataset.get_full_dataset()
-        
         # 从数据集获取奖励权重
         dist_info = dataset.get_class_distribution()
         if dist_info["reward_weights"] is not None:
             self.set_reward_weights(dist_info["reward_weights"])
             
+        # 获取训练数据加载器
+        train_loader, _ = dataset.get_dataloaders()
+        
         self.step_count = 0
         episode = 0
         
         # 创建总体训练进度条
         total_pbar = tqdm(total=self.t_max, desc="Training Progress", unit="step")
         
-        # 外层循环: for episode k = 1 to K do (直到达到最大步数)
+        # 外层循环: 每个episode都遍历整个数据集
         while self.step_count < self.t_max:
             episode += 1
             
-            # 打乱训练数据顺序 (Shuffle the training data D)
-            indices = torch.randperm(len(train_data))
-            shuffled_data = train_data[indices]
-            shuffled_labels = train_labels[indices]
-            
-            # 初始化状态 s_1 = x_1
-            current_state = shuffled_data[0:1].float().to(self.device)
-            
-            # 进度条显示
-            episode_pbar = tqdm(
-                total=len(shuffled_data)-1,  # 最后一个样本没有next_state
-                desc=f"Episode {episode}", 
-                leave=False, 
-                unit="sample"
-            )
-            
-            # 内层循环: for t = 1 to T do (遍历所有样本)
-            for t in range(len(shuffled_data) - 1):
+            # 使用批处理遍历训练数据
+            for batch_idx, (data_batch, labels_batch) in enumerate(train_loader):
                 # 检查是否已达到最大步数
                 if self.step_count >= self.t_max:
                     break
                 
-                # 获取当前标签
-                current_label = shuffled_labels[t].item()
+                # 将数据移至GPU
+                data_batch = data_batch.float().to(self.device)
+                labels_batch = labels_batch.to(self.device)
                 
-                # 根据ε-greedy策略选择动作 (Choose an action based on ε-greedy policy)
-                if random.random() < self.epsilon:
-                    action = random.randint(0, self.num_classes - 1)  # 随机探索，范围0-8
-                else:
-                    with torch.no_grad():
-                        # 确保输入维度正确
-                        model_input = current_state
-                        if self.model_type.startswith('TBM_conv1d'):
-                            if model_input.shape[1] == 1024 and model_input.shape[2] == 3:
-                                model_input = model_input.transpose(1, 2)
-                        q_values = self.q_net(model_input)
-                    action = q_values.argmax().item()
+                batch_size = data_batch.size(0)
                 
-                # 计算奖励和终止标志 (r_t, terminal_t = STEP(a_t, l_t))
-                reward, terminal = self.compute_reward(action, current_label)
+                # 为当前批次准备动作选择 - 批量处理
+                # 使用epsilon-greedy策略
+                rand_vals = torch.rand(batch_size).to(self.device)
+                random_actions = torch.randint(0, self.num_classes, (batch_size,)).to(self.device)
                 
-                # 获取下一状态 (Set s_{t+1} = x_{t+1})
-                next_state = shuffled_data[t+1:t+2].float().to(self.device)
+                # 批量计算Q值 - 确保输入维度正确
+                model_input = data_batch.clone()
+                if self.model_type.startswith('TBM_conv1d'):
+                    model_input = model_input.transpose(1, 2)
                 
-                # 存储经验到记忆库 - 保持原始形状一致
-                self.replay_memory.append((
-                    current_state.squeeze(0).cpu().clone().detach(),  # 保持原始形状
-                    action,
-                    reward,
-                    next_state.squeeze(0).cpu().clone().detach(),  # 保持原始形状
-                    terminal
-                ))
+                with torch.no_grad():
+                    q_values = self.q_net(model_input)
                 
-                # 从记忆库中采样并学习(仅当记忆库足够大时)
-                if len(self.replay_memory) >= self.batch_size:
-                    # 根据terminal状态决定是否更新目标网络
-                    self.replay_experience(update_target=not terminal)
-
+                greedy_actions = q_values.argmax(dim=1)
+                
+                # 根据epsilon决定使用随机动作还是贪婪动作
+                actions = torch.where(rand_vals < self.epsilon, random_actions, greedy_actions)
+                
+                # 批量计算奖励和重要性因子
+                rewards = self.compute_reward_batch(actions, labels_batch)
+                
+                # 创建"下一个状态"张量
+                next_states = torch.zeros_like(data_batch)
+                next_states[:-1] = data_batch[1:].clone()
+                next_states[-1] = data_batch[-1].clone()
+                
+                # 将经验存入记忆库 - 这一步仍然需要循环，因为deque不支持批量添加
+                for i in range(data_batch.size(0)):
+                    self.replay_memory.append((
+                        data_batch[i].cpu().clone().detach(),
+                        actions[i].item(),
+                        rewards[i].item(),
+                        next_states[i].cpu().clone().detach(),
+                        labels_batch[i].item()  # 存储标签而不是imp_factor
+                    ))
+                
+                # 关于条件判断的必要性：
+                # 1. if len(self.replay_memory) >= self.batch_size: 这个判断是必要的
+                # 因为在记忆库积累足够样本前无法进行批量学习
+                # if len(self.replay_memory) >= self.batch_size:
+                    # 执行批量更新，一次更新多个步骤
+                updates_per_batch = min(data_batch.size(0), self.t_max - self.step_count)
+                for _ in range(updates_per_batch):
+                    # 2. if self.step_count >= self.t_max: 这个判断也是必要的
+                    # 它确保我们不会超过预定的最大步数
+                    if self.step_count >= self.t_max:
+                        break
+                    self.replay_experience()
                     self.step_count += 1
                     total_pbar.update(1)
                 
                 # 更新进度条
-                episode_pbar.update(1)
-                episode_pbar.set_postfix({
-                    'Step': self.step_count,
+                total_pbar.set_postfix({
+                    'Episode': episode,
                     'Epsilon': f'{self.epsilon:.4f}',
-                    'Reward': f'{reward:.4f}',
-                    'Terminal': terminal
+                    'Memory': len(self.replay_memory)
                 })
-                
-                # 如果是terminal状态，则终止当前episode
-                # if terminal:
-                #     break
-                    
-                # 设置当前状态为下一状态，继续循环
-                current_state = next_state
-            
-            episode_pbar.close()
-            
-            # 显示episode信息
-            total_pbar.set_postfix({
-                'Episode': episode,
-                'Epsilon': f'{self.epsilon:.4f}',
-                'Memory': len(self.replay_memory)
-            })
         
         total_pbar.close()
         print("训练完成!")
@@ -506,6 +547,7 @@ def main():
         ('TBM_0.01', 0.01),  # 使用统一的数据集名称，我们将在ImbalancedDataset类中读取指定文件
         ('TBM_0.001', 0.001)
     ]
+    
     # 定义要测试的奖励倍数列表
     reward_multipliers = [1]
     
@@ -513,10 +555,10 @@ def main():
     discount_factors = [0.1]
     
     # 使用固定的模型变体
-    model_variants = ['BiLSTM']  # 例如 'TBM_conv1d_1layer', 'TBM_conv1d_3layer', 'ResNet32_1D', 'LSTM', 'BiLSTM', 'Transformer'
+    model_variants = ['BiLSTM']  # 只使用BiLSTM模型变体
     
     # 使用绝对路径
-    save_dir = '/workspace/RL/DQNimb/multi_class_results'
+    save_dir = '/workspace/RL/DRLimb-Multi/multi_class_results'
     
     # 创建保存目录（如果不存在）
     os.makedirs(save_dir, exist_ok=True)
@@ -550,13 +592,11 @@ def main():
                         
                         # 获取分类数量
                         num_classes = 9  # 固定为9个类别（0-8）
-                        # 设置与训练时相同的参数
-                        num_runs = 2
+                        num_runs = 1
                         training_ratio = 1  # 使用与训练时相同的ratio
                         if TEST_ONLY:
                             print("测试模式: 加载多个模型并分别评估")
-                            
-                            
+
                             # 根据模型类型创建相应的模型，指定输出维度为9
                             if model_type == 'TBM_conv1d':
                                 q_net = TBM_conv1d(input_shape, output_dim=num_classes)
@@ -669,7 +709,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 
