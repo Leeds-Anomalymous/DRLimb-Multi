@@ -7,13 +7,13 @@ from torch.utils.data import DataLoader, Subset, TensorDataset
 # from sklearn.model_selection import train_test_split
 
 class ImbalancedDataset:
-    def __init__(self, dataset_name="mnist", rho=0.01, batch_size=64, seed=42):
+    def __init__(self, dataset_name="TBM_0.01", rho=0.01, batch_size=64, seed=42):
         """
         初始化数据集处理类
-        :param dataset_name: 数据集名称 (e.g., "mnist", "cifar10", "TBM_K_M_Noise")
+        :param dataset_name: 数据集名称 
         :param rho: 不平衡因子 (用于某些数据集)
         :param batch_size: DataLoader 批次大小
-        :param seed: 随机种子（确保可复现）
+        :param seed: 随机种子(确保可复现)
         """
         self.dataset_name = dataset_name
         self.rho = rho
@@ -28,29 +28,12 @@ class ImbalancedDataset:
         # 添加存储类别样本数的字典
         self.class_counts = {}
         
-        # 预处理数据（针对多分类）
+        # 预处理数据(针对多分类)
         self._preprocess_data()
 
     def load_raw_data(self):
-        """加载原始数据集（需扩展时在此添加新数据集）"""
-        if self.dataset_name == "mnist":
-            # MNIST数据集处理（略）
-            transform = torchvision.transforms.Compose([
-                torchvision.transforms.ToTensor(),
-                torchvision.transforms.Normalize((0.1307,), (0.3081,)) #对每个像素进行归一化，0.1307和0.3081分别是MNIST训练集的均值和标准差。这样可以让模型训练更稳定、收敛更快。
-            ])
-            
-            print("正在下载MNIST训练集...")
-            train_set = torchvision.datasets.MNIST(
-                root='./data', train=True, download=True, transform=transform
-            )
-            
-            print("正在下载MNIST测试集...")
-            test_set = torchvision.datasets.MNIST(
-                root='./data', train=False, download=True, transform=transform
-            )
-            return train_set, test_set
-        elif self.dataset_name == "TBM_0.01":
+        """加载原始数据集(需扩展时在此添加新数据集)"""
+        if self.dataset_name in ["TBM_0.01", "TBM_0.01_class", "TBM_0.01_K", "TBM_0.01_M"]:
             # 所有TBM数据集使用统一的文件路径
             print(f"正在加载TBM训练集...")
             train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.01_head10000.h5')
@@ -63,59 +46,13 @@ class ImbalancedDataset:
             test_set = self._create_dataset_from_arrays(test_data, test_labels)
             
             return train_set, test_set
-        elif self.dataset_name == "TBM_fault_0.01":
-            # 加载TBM数据集并过滤掉label=0的样本
-            print(f"正在加载TBM故障训练集（过滤正常样本）...")
-            train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.01_head10000.h5')
-            
-            # 过滤掉标签为0的样本
-            fault_indices = train_labels != 0
-            train_data = train_data[fault_indices]
-            train_labels = train_labels[fault_indices]
-            
-            print(f"正在加载TBM故障测试集（过滤正常样本）...")
-            test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05.h5')
-            
-            # 过滤掉标签为0的样本
-            fault_indices = test_labels != 0
-            test_data = test_data[fault_indices]
-            test_labels = test_labels[fault_indices]
-            
-            # 创建训练集和测试集
-            train_set = self._create_dataset_from_arrays(train_data, train_labels)
-            test_set = self._create_dataset_from_arrays(test_data, test_labels)
-            
-            return train_set, test_set
-        elif self.dataset_name== "TBM_0.001":
+        elif self.dataset_name == "TBM_0.001":
             # 所有TBM数据集使用统一的文件路径
             print(f"正在加载TBM训练集...")
             train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
             
             print(f"正在加载TBM测试集...")
             test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05.h5')
-            
-            # 创建训练集和测试集
-            train_set = self._create_dataset_from_arrays(train_data, train_labels)
-            test_set = self._create_dataset_from_arrays(test_data, test_labels)
-            
-            return train_set, test_set
-        elif self.dataset_name == "TBM_fault_0.001":
-            # 加载TBM数据集并过滤掉label=0的样本
-            print(f"正在加载TBM故障训练集（过滤正常样本）...")
-            train_data, train_labels = self._load_h5_file('/datasets/TBM/train_data/data/train_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05_ratio0.001_head10000.h5')
-            
-            # 过滤掉标签为0的样本
-            fault_indices = train_labels != 0
-            train_data = train_data[fault_indices]
-            train_labels = train_labels[fault_indices]
-            
-            print(f"正在加载TBM故障测试集（过滤正常样本）...")
-            test_data, test_labels = self._load_h5_file('/datasets/TBM/train_data/data/test_dataset0.3_1024_512_standard_snr5_prob0.3_amp0.05.h5')
-            
-            # 过滤掉标签为0的样本
-            fault_indices = test_labels != 0
-            test_data = test_data[fault_indices]
-            test_labels = test_labels[fault_indices]
             
             # 创建训练集和测试集
             train_set = self._create_dataset_from_arrays(train_data, train_labels)
@@ -140,10 +77,51 @@ class ImbalancedDataset:
         dataset.targets = labels
         return dataset
 
+    def _filter_and_remap_classes(self, data, labels, class_list, label_mapping):
+        """
+        过滤特定类别并重新映射标签
+        :param data: 原始数据
+        :param labels: 原始标签
+        :param class_list: 要保留的类别列表
+        :param label_mapping: 标签映射字典
+        :return: 过滤后的数据和重新映射的标签
+        """
+        # 创建掩码，选择指定类别
+        mask = np.isin(labels, class_list)
+        filtered_data = data[mask]
+        filtered_labels = labels[mask]
+        
+        # 重新映射标签
+        remapped_labels = np.array([label_mapping[label] for label in filtered_labels])
+        
+        return filtered_data, remapped_labels
+
+    def _downsample_to_min_class(self, data, labels):
+        """
+        将所有类别降采样到最少样本数
+        :param data: 数据
+        :param labels: 标签
+        :return: 降采样后的数据和标签
+        """
+        unique_classes = np.unique(labels)
+        class_counts = {cls: np.sum(labels == cls) for cls in unique_classes}
+        min_count = min(class_counts.values())
+        
+        sampled_data = []
+        sampled_labels = []
+        
+        for cls in unique_classes:
+            cls_indices = np.where(labels == cls)[0]
+            sampled_indices = np.random.choice(cls_indices, size=min_count, replace=False)
+            sampled_data.append(data[sampled_indices])
+            sampled_labels.append(labels[sampled_indices])
+        
+        return np.concatenate(sampled_data), np.concatenate(sampled_labels)
+
     def _preprocess_data(self):
         """
         核心预处理：处理多分类数据
-        - 保留原始标签（0-8）
+        - 保留原始标签(0-8)
         - 计算每个类别的样本数
         """
         # 获取标签数据 - 处理不同数据集的标签格式
@@ -161,6 +139,66 @@ class ImbalancedDataset:
         else:
             test_labels = self.test_data.targets.numpy()
         
+        # 获取训练数据
+        if not isinstance(self.train_data.data, np.ndarray):
+            train_data = self.train_data.data
+        else:
+            train_data = self.train_data.data
+            
+        if not isinstance(self.test_data.data, np.ndarray):
+            test_data = self.test_data.data
+        else:
+            test_data = self.test_data.data
+        
+        # 根据dataset_name进行不同的处理
+        if self.dataset_name == "TBM_0.01_class":
+            # 合并为三类: 0(正常), K类(0,2,3,5,6,8), M类(1,4,7)
+            # 标签映射: 0->0, K类->1, M类->2
+            print("处理TBM_0.01_class: 合并为0, K, M三类并降采样...")
+            
+            # 创建标签映射
+            label_mapping = {
+                0: 0,  # 正常类
+                2: 1, 3: 1, 5: 1, 6: 1, 8: 1,  # K类
+                1: 2, 4: 2, 7: 2  # M类
+            }
+            
+            # 处理训练集
+            train_labels_mapped = np.array([label_mapping[label] for label in train_labels])
+            train_data, train_labels_mapped = self._downsample_to_min_class(train_data, train_labels_mapped)
+            
+            # 处理测试集
+            test_labels_mapped = np.array([label_mapping[label] for label in test_labels])
+            
+            train_labels = train_labels_mapped
+            test_labels = test_labels_mapped
+            
+        elif self.dataset_name == "TBM_0.01_K":
+            # 只保留K类(2,3,5,6,8)
+            print("处理TBM_0.01_K: 只保留K类...")
+            k_classes = [2, 3, 5, 6, 8]
+            label_mapping = {2: 0, 3: 1, 5: 2, 6: 3, 8: 4}
+            
+            train_data, train_labels = self._filter_and_remap_classes(
+                train_data, train_labels, k_classes, label_mapping
+            )
+            test_data, test_labels = self._filter_and_remap_classes(
+                test_data, test_labels, k_classes, label_mapping
+            )
+            
+        elif self.dataset_name == "TBM_0.01_M":
+            # 只保留M类(1,4,7)
+            print("处理TBM_0.01_M: 只保留M类...")
+            m_classes = [1, 4, 7]
+            label_mapping = {1: 0, 4: 1, 7: 2}
+            
+            train_data, train_labels = self._filter_and_remap_classes(
+                train_data, train_labels, m_classes, label_mapping
+            )
+            test_data, test_labels = self._filter_and_remap_classes(
+                test_data, test_labels, m_classes, label_mapping
+            )
+        
         # 计算训练集中每个类别的样本数
         unique_classes, class_counts = np.unique(train_labels, return_counts=True)
         self.class_counts = {cls: count for cls, count in zip(unique_classes, class_counts)}
@@ -174,18 +212,14 @@ class ImbalancedDataset:
         self.reward_weights = {cls: self.min_count / count for cls, count in self.class_counts.items()}
         
         # 确保训练数据是torch张量
-        if not isinstance(self.train_data.data, torch.Tensor):
-            train_data = torch.tensor(self.train_data.data)
-        else:
-            train_data = self.train_data.data
+        if not isinstance(train_data, torch.Tensor):
+            train_data = torch.tensor(train_data)
             
         self.train_data = TensorDataset(train_data, torch.tensor(train_labels))
         
         # 处理测试集
-        if not isinstance(self.test_data.data, torch.Tensor):
-            test_data = torch.tensor(self.test_data.data)
-        else:
-            test_data = self.test_data.data
+        if not isinstance(test_data, torch.Tensor):
+            test_data = torch.tensor(test_data)
             
         self.test_data = TensorDataset(test_data, torch.tensor(test_labels))
 
@@ -203,7 +237,7 @@ class ImbalancedDataset:
         test_loader = DataLoader(
             self.test_data, 
             batch_size=self.batch_size, 
-            shuffle=False
+            shuffle=True
         )
         return train_loader, test_loader
         
@@ -219,7 +253,7 @@ class ImbalancedDataset:
         return train_data, train_labels, test_data, test_labels
 
     def get_class_distribution(self):
-        """返回处理后的类别分布（用于验证）"""
+        """返回处理后的类别分布(用于验证)"""
         train_labels = self.train_data.tensors[1].numpy()
         test_labels = self.test_data.tensors[1].numpy()
         

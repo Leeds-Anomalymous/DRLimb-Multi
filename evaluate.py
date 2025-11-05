@@ -80,9 +80,10 @@ def plot_confusion_matrix(y_true, y_pred, save_path=None, model_type=None, datas
 def evaluate_model(model, test_loader, save_dir='/root/autodl-tmp/checkpoints', dataset_name=None, training_ratio=None, rho=None, dataset_obj=None, run_number=None, model_type=None, reward_multiplier=1.0, discount_factor=0.1):
     """
     评估模型性能并计算相关指标
+    支持普通分类器和层次化分类器
     
     Args:
-        model: 训练好的模型
+        model: 训练好的模型或层次化分类器
         test_loader: 测试数据加载器
         save_dir: 保存结果的目录
         dataset_name: 数据集名称
@@ -95,37 +96,32 @@ def evaluate_model(model, test_loader, save_dir='/root/autodl-tmp/checkpoints', 
         discount_factor: 折扣因子
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
+    
+    # 检查是否为层次化分类器
+    is_hierarchical = hasattr(model, 'predict') and hasattr(model, 'class_model')
+    
+    if not is_hierarchical:
+        # 普通分类器
+        model.to(device)
+        model.eval()
+    else:
+        # 层次化分类器已经在初始化时将子模型移到了device
+        pass
     
     all_preds = []
     all_labels = []
     
     with torch.no_grad():
         for data, labels in test_loader:
-            # 根据模型类型进行不同的数据预处理
-            if 'TBM' in str(dataset_name) or 'TBM' in str(model_type):
-                # 针对TBM数据的处理
-                # 如果数据是4D，需要调整为3D [batch_size, channels, length]
-                if len(data.shape) == 4:  # [batch_size, 1, 3, 1024]
-                    data = data.squeeze(1)  # 移除额外的维度，变为[batch_size, 3, 1024]
-                
-                # 如果维度顺序是[batch_size, length, channels]，需要转置
-                if data.shape[1] != 3 and data.shape[2] == 3:
-                    data = data.transpose(1, 2)  # 转换为[batch_size, channels, length]
-                
-                data = data.float().to(device)
-            else:
-                # 图像数据需要添加通道维度
-                if len(data.shape) == 3:  # (N, 28, 28)
-                    data = data.unsqueeze(1)  # 添加通道维度 -> (N, 1, 28, 28)
-                # 修正通道顺序（如果需要）
-                if data.shape[1] != 3 and data.shape[-1] == 3:
-                    data = data.permute(0, 3, 1, 2)  # NHWC -> NCHW
-                data = data.float().to(device)
+            data = data.float().to(device)
             
-            outputs = model(data)
-            _, predicted = torch.max(outputs, 1)
+            if is_hierarchical:
+                # 使用层次化分类器的predict方法
+                predicted = model.predict(data)
+            else:
+                # 普通分类器
+                outputs = model(data)
+                _, predicted = torch.max(outputs, 1)
             
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
@@ -138,7 +134,8 @@ def evaluate_model(model, test_loader, save_dir='/root/autodl-tmp/checkpoints', 
     metrics = compute_metrics(all_labels, all_preds)
     
     # 打印结果
-    print("\n===== 模型评估结果 =====")
+    model_desc = "层次化分类器" if is_hierarchical else "普通分类器"
+    print(f"\n===== {model_desc}评估结果 =====")
     print(f"总体准确率: {metrics['accuracy']:.4f}")
     print(f"头部准确率 [0,1,2]: {metrics['head_acc']:.4f}")
     print(f"中部准确率 [3,4,5]: {metrics['mid_acc']:.4f}")
@@ -220,7 +217,6 @@ def evaluate_model(model, test_loader, save_dir='/root/autodl-tmp/checkpoints', 
         print(f"保存Excel文件时出错: {e}")
     
     # 绘制混淆矩阵
-    # 生成带数据集名称、模型类型、不平衡率、奖励倍数、折扣因子、训练完成比例和序号的文件名
     dataset_str = dataset_name if dataset_name else 'Unknown'
     model_str = model_type if model_type else 'Unknown'
     rho_str = f"rho{rho}" if rho is not None else 'rhoUnknown'
@@ -235,3 +231,130 @@ def evaluate_model(model, test_loader, save_dir='/root/autodl-tmp/checkpoints', 
                          dataset_name=dataset_name, training_ratio=training_ratio, rho=rho)
     
     return metrics
+
+def evaluate_model2(model, test_loader, save_dir='/root/autodl-tmp/checkpoints', dataset_name=None,
+                    training_ratio=None, rho=None, dataset_obj=None, run_number=None, model_type=None,
+                    reward_multiplier=1.0, discount_factor=0.1):
+    """
+    评估单一分类器（class/K/M）模型的性能，计算总体准确率与各类别准确率
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for data, labels in test_loader:
+            outputs = model(data)
+            _, predicted = torch.max(outputs, 1)
+
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+
+    accuracy = accuracy_score(all_labels, all_preds)
+
+    classes = None
+    if dataset_obj is not None:
+        try:
+            class_distribution = dataset_obj.get_class_distribution()
+            classes = list(range(len(class_distribution['test'])))
+        except Exception as e:
+            print(f"获取类别信息时出错: {e}")
+
+    if classes is None:
+        classes = sorted(np.unique(np.concatenate([all_labels, all_preds])))
+
+    per_class_accuracy = {}
+    for cls in classes:
+        cls_mask = all_labels == cls
+        if np.any(cls_mask):
+            per_class_accuracy[cls] = accuracy_score(all_labels[cls_mask], all_preds[cls_mask])
+        else:
+            per_class_accuracy[cls] = 0.0
+
+    print("\n===== 单分类器模型评估结果 =====")
+    print(f"总体准确率: {accuracy:.4f}")
+    for cls, acc in per_class_accuracy.items():
+        print(f"类别 {cls} 准确率: {acc:.4f}")
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    max_class_count = 0
+    min_class_count = float('inf')
+    test_samples_count = 0
+
+    if dataset_obj is not None:
+        try:
+            class_distribution = dataset_obj.get_class_distribution()
+            train_counts = class_distribution['train']
+            max_class_count = max(train_counts) if len(train_counts) > 0 else 0
+            min_class_count = min(train_counts) if len(train_counts) > 0 else 0
+            test_samples_count = sum(class_distribution['test'])
+            print(f"最多样本类别数量: {max_class_count}")
+            print(f"最少样本数量: {min_class_count}")
+            print(f"测试集样本总数: {test_samples_count}")
+        except Exception as e:
+            print(f"获取数据集统计信息时出错: {e}")
+
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_data = {
+        '评估时间': [current_time],
+        '数据集名称': [dataset_name if dataset_name else 'Unknown'],
+        '模型类型': [model_type if model_type else 'Unknown'],
+        '训练完成比例': [training_ratio if training_ratio is not None else 'Unknown'],
+        '不平衡率rho': [rho if rho is not None else 'Unknown'],
+        '奖励倍数': [reward_multiplier if reward_multiplier is not None else 1.0],
+        '折扣因子': [discount_factor if discount_factor is not None else 0.1],
+        '最多样本数': [max_class_count],
+        '最少样本数': [min_class_count],
+        '测试集样本数': [test_samples_count],
+        '总体准确率': [accuracy]
+    }
+    for cls, acc in per_class_accuracy.items():
+        new_data[f'类别{cls}准确率'] = [acc]
+
+    new_df = pd.DataFrame(new_data)
+    excel_path = os.path.join(save_dir, f'evaluation_results_{dataset_name}.xlsx')
+
+    if os.path.exists(excel_path):
+        try:
+            existing_df = pd.read_excel(excel_path, header=0)
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        except Exception as e:
+            print(f"读取现有Excel文件时出错: {e}")
+            print("将创建新文件")
+            combined_df = new_df
+    else:
+        combined_df = new_df
+
+    try:
+        combined_df.to_excel(excel_path, index=False, header=True)
+        print(f"评估结果已保存到 {excel_path}")
+        print(f"当前文件包含 {len(combined_df)} 条评估记录")
+    except Exception as e:
+        print(f"保存Excel文件时出错: {e}")
+
+    dataset_str = dataset_name if dataset_name else 'Unknown'
+    model_str = model_type if model_type else 'Unknown'
+    rho_str = f"rho{rho}" if rho is not None else 'rhoUnknown'
+    reward_str = f"reward{reward_multiplier}" if reward_multiplier is not None else 'reward1.0'
+    gamma_str = f"gamma{discount_factor}" if discount_factor is not None else 'gamma0.1'
+    ratio_str = f"{training_ratio}" if training_ratio is not None else 'Unknown'
+    run_str = f"第{run_number}次" if run_number is not None else '未指定次数'
+
+    cm_filename = f'{dataset_str}_{model_str}_{rho_str}_{reward_str}_{gamma_str}_训练完成比{ratio_str}_{run_str}_per_class_cm.png'
+    cm_path = os.path.join(save_dir, cm_filename)
+
+    plot_confusion_matrix(all_labels, all_preds, save_path=cm_path,
+                          model_type=model_type, dataset_name=dataset_name,
+                          training_ratio=training_ratio, rho=rho)
+
+    return {
+        'accuracy': accuracy,
+        'per_class_accuracy': per_class_accuracy
+    }
